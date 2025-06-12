@@ -1,11 +1,11 @@
 FROM hanxi/xiaomusic:builder AS builder
-ENV DEBIAN_FRONTEND=noninteractive
 RUN pip install -U pdm
 ENV PDM_CHECK_UPDATE=false
 WORKDIR /app
 COPY pyproject.toml README.md .
 COPY xiaomusic/ ./xiaomusic/
 COPY plugins/ ./plugins/
+COPY holiday/ ./holiday/
 COPY xiaomusic.py .
 RUN pdm install --prod --no-editable
 
@@ -14,6 +14,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv ./.venv
 COPY --from=builder /app/xiaomusic/ ./xiaomusic/
 COPY --from=builder /app/plugins/ ./plugins/
+COPY --from=builder /app/holiday/ ./holiday/
 COPY --from=builder /app/xiaomusic.py .
 COPY --from=builder /app/xiaomusic/__init__.py /base_version.py
 RUN touch /app/.dockerenv

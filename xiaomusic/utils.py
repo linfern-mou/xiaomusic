@@ -22,7 +22,8 @@ import urllib.parse
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from http.cookies import SimpleCookie
-from urllib.parse import urlparse
+from time import sleep
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import mutagen
@@ -941,6 +942,80 @@ def _set_wave_tags(audio, info):
     audio["Artist"] = info.artist
 
 
+async def check_bili_fav_list(url):
+    bvid_info = {}
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    # 提取查询参数
+    query_params = parse_qs(parsed_url.query)
+    if parsed_url.hostname == "space.bilibili.com":
+        if "/favlist" in path:
+            lid = query_params.get("fid", [None])[0]
+            type = query_params.get("ctype", [None])[0]
+            if type == "11":
+                type = "create"
+            elif type == "21":
+                type = "collect"
+            else:
+                raise ValueError("当前只支持合集和收藏夹")
+        elif "/lists/" in path:
+            parts = path.split("/")
+            if len(parts) >= 4 and "?" in url:
+                lid = parts[3]  # 提取 lid
+                type = query_params.get("type", [None])[0]
+        # https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?season_id={lid}&page_size=30&page_num=1
+        page_size = 100
+        page_num = 1
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": url,
+            "Origin": "https://space.bilibili.com",
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            if type == "season" or type == "collect":
+                while True:
+                    list_url = f"https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?season_id={lid}&page_size={page_size}&page_num={page_num}"
+                    async with session.get(list_url) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to fetch data from {list_url}")
+                        data = await response.json()
+                        archives = data.get("data", {}).get("archives", [])
+                        if not archives:
+                            break
+                        for archive in archives:
+                            bvid = archive.get("bvid", None)
+                            title = archive.get("title", None)
+                            bvid_info[bvid] = title
+
+                        if len(archives) < page_size:
+                            break
+                        page_num += 1
+                        sleep(1)
+            elif type == "create":
+                while True:
+                    list_url = f"https://api.bilibili.com/x/v3/fav/resource/list?media_id={lid}&pn={page_num}&ps={page_size}&order=mtime"
+                    async with session.get(list_url) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to fetch data from {list_url}")
+                        data = await response.json()
+                        medias = data.get("data", {}).get("medias", [])
+                        if not medias:
+                            break
+                        for media in medias:
+                            bvid = media.get("bvid", None)
+                            title = media.get("title", None)
+                            bvurl = f"https://www.bilibili.com/video/{bvid}"
+                            bvid_info[bvurl] = title
+
+                        if len(medias) < page_size:
+                            break
+                        page_num += 1
+            else:
+                raise ValueError("当前只支持合集和收藏夹")
+    return bvid_info
+
+
 # 下载播放列表
 async def download_playlist(config, url, dirname):
     title = f"{dirname}/%(title)s.%(ext)s"
@@ -1030,6 +1105,16 @@ def _longest_common_prefix(file_names):
                 return ""
 
     return prefix
+
+
+def safe_join_path(safe_root, directory):
+    directory = os.path.join(safe_root, directory)
+    # Normalize the directory path
+    normalized_directory = os.path.normpath(directory)
+    # Ensure the directory is within the safe root
+    if not normalized_directory.startswith(os.path.normpath(safe_root)):
+        raise ValueError(f"Access to directory '{directory}' is not allowed.")
+    return normalized_directory
 
 
 # 移除目录下文件名前缀相同的

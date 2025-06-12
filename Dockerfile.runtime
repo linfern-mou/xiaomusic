@@ -1,16 +1,18 @@
-FROM python:3.10-slim
-ENV DEBIAN_FRONTEND=noninteractive
+FROM python:3.12-alpine3.22
 
-RUN apt-get update && apt-get install -y \
+RUN apk add --no-cache  bash\
     wget \
-    xz-utils \
-    libtiff6 \
-    libopenjp2-7 \
-    libxcb1 \
+    xz \
+    tiff \
+    openjpeg \
+    libxcb \
     supervisor \
     vim \
+    libc6-compat \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY install_dependencies.sh .
-RUN bash install_dependencies.sh
+RUN mkdir -p /app/ffmpeg/bin \
+    && ln -s /usr/bin/ffmpeg /app/ffmpeg/bin/ffmpeg \
+    && ln -s /usr/bin/ffprobe /app/ffmpeg/bin/ffprobe
