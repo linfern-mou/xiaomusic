@@ -1,16 +1,21 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import secrets
 import shutil
 import tempfile
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated
+from urllib.parse import urlparse
 
+import jwt
 import socketio
+from fastapi import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
     from xiaomusic.xiaomusic import XiaoMusic
@@ -19,6 +24,7 @@ if TYPE_CHECKING:
     from xiaomusic.xiaomusic import XiaoMusic
 
 import aiofiles
+import aiohttp
 from fastapi import (
     Depends,
     FastAPI,
@@ -32,7 +38,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -339,7 +345,7 @@ async def musiclist(Verifcation=Depends(verification)):
 async def musicinfo(
     name: str, musictag: bool = False, Verifcation=Depends(verification)
 ):
-    url = xiaomusic.get_music_url(name)
+    url, _ = await xiaomusic.get_music_url(name)
     info = {
         "ret": "OK",
         "name": name,
@@ -358,7 +364,7 @@ async def musicinfos(
 ):
     ret = []
     for music_name in name:
-        url = xiaomusic.get_music_url(music_name)
+        url, _ = await xiaomusic.get_music_url(music_name)
         info = {
             "name": music_name,
             "url": url,
@@ -859,3 +865,165 @@ async def get_redoc_documentation(Verifcation=Depends(verification)):
 @app.get("/openapi.json", include_in_schema=False)
 async def openapi(Verifcation=Depends(verification)):
     return get_openapi(title=app.title, version=app.version, routes=app.routes)
+
+
+@app.get("/proxy", summary="基于正常下载逻辑的代理接口")
+async def proxy(urlb64: str):
+    try:
+        # 将Base64编码的URL解码为字符串
+        url_bytes = base64.b64decode(urlb64)
+        url = url_bytes.decode("utf-8")
+        print(f"解码后的代理请求: {url}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Base64解码失败: {str(e)}") from e
+
+    log.info(f"代理请求: {url}")
+
+    parsed_url = urlparse(url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        # Fixed: Use a new exception instance since 'e' from previous block is out of scope
+        invalid_url_exc = ValueError("URL缺少协议或域名")
+        raise HTTPException(
+            status_code=400, detail="无效的URL格式"
+        ) from invalid_url_exc
+
+    # 创建会话并确保关闭
+    session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=600),
+        connector=aiohttp.TCPConnector(ssl=True),
+    )
+
+    # 复用经过验证的请求头配置
+    def get_wget_headers(parsed_url):
+        return {
+            "User-Agent": "Wget/1.21.3",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "Keep-Alive",
+        }
+
+    async def close_session():
+        if not session.closed:
+            await session.close()
+
+    try:
+        # 复用download_file中的请求逻辑
+        headers = get_wget_headers(parsed_url)
+        resp = await session.get(url, headers=headers, allow_redirects=True)
+
+        if resp.status not in (200, 206):
+            await close_session()
+            status_exc = ValueError(f"服务器返回状态码: {resp.status}")
+            raise HTTPException(
+                status_code=resp.status, detail=f"下载失败，状态码: {resp.status}"
+            ) from status_exc
+
+        # 流式生成器，与download_file的分块逻辑一致
+        async def stream_generator():
+            try:
+                async for data in resp.content.iter_chunked(4096):
+                    yield data
+            finally:
+                await close_session()
+
+        # 提取文件名
+        filename = parsed_url.path.split("/")[-1].split("?")[0] or "output.mp3"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type=resp.headers.get("Content-Type", "audio/mpeg"),
+            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+            background=BackgroundTask(close_session),
+        )
+
+    except aiohttp.ClientConnectionError as e:
+        await close_session()
+        raise HTTPException(status_code=502, detail=f"连接错误: {str(e)}") from e
+    except asyncio.TimeoutError as e:
+        await close_session()
+        raise HTTPException(status_code=504, detail="下载超时") from e
+    except Exception as e:
+        await close_session()
+        raise HTTPException(status_code=500, detail=f"发生错误: {str(e)}") from e
+
+
+# 配置
+JWT_SECRET = secrets.token_urlsafe(32)
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_SECONDS = 60 * 5  # 5 分钟有效期（足够前端连接和重连）
+
+
+@app.get("/generate_ws_token")
+def generate_ws_token(
+    did: str,
+    _: bool = Depends(verification),  # 复用 HTTP Basic 验证
+):
+    if not xiaomusic.did_exist(did):
+        raise HTTPException(status_code=400, detail="Invalid did")
+
+    payload = {
+        "did": did,
+        "exp": time.time() + JWT_EXPIRE_SECONDS,
+        "iat": time.time(),
+    }
+
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    return {
+        "token": token,
+        "expire_in": JWT_EXPIRE_SECONDS,
+    }
+
+
+@app.websocket("/ws/playingmusic")
+async def ws_playingmusic(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Missing token")
+        return
+
+    try:
+        # 解码 JWT（自动校验签名 + 是否过期）
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        did = payload.get("did")
+
+        if not did:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+
+        if not xiaomusic.did_exist(did):
+            await websocket.close(code=1003, reason="Did not exist")
+            return
+
+        await websocket.accept()
+
+        # 开始推送状态
+        while True:
+            is_playing = xiaomusic.isplaying(did)
+            cur_music = xiaomusic.playingmusic(did)
+            cur_playlist = xiaomusic.get_cur_play_list(did)
+            offset, duration = xiaomusic.get_offset_duration(did)
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "ret": "OK",
+                        "is_playing": is_playing,
+                        "cur_music": cur_music,
+                        "cur_playlist": cur_playlist,
+                        "offset": offset,
+                        "duration": duration,
+                    }
+                )
+            )
+            await asyncio.sleep(1)
+
+    except jwt.ExpiredSignatureError:
+        await websocket.close(code=1008, reason="Token expired")
+    except jwt.InvalidTokenError:
+        await websocket.close(code=1008, reason="Invalid token")
+    except WebSocketDisconnect:
+        print(f"WebSocket disconnected: {did}")
+    except Exception as e:
+        print(f"Error: {e}")
+        await websocket.close()

@@ -86,6 +86,10 @@ services:
 
 > [!TIP]
 >
+> 喜欢听书的可以配合这个工具使用 <https://github.com/hanxi/epub2mp3>
+
+> [!TIP]
+>
 > - 🔥【广告:可用于安装 frp 实现内网穿透】
 > - 🔥 海外 RackNerd VPS 机器推荐，可支付宝付款。
 > - <a href="https://my.racknerd.com/aff.php?aff=11177"><img src="https://racknerd.com/banners/320x50.gif" alt="RackNerd Mobile Leaderboard Banner" width="320" height="50"></a>
@@ -117,7 +121,7 @@ services:
 - 【加入收藏】，把当前播放的歌曲加入收藏歌单。
 - 【取消收藏】，把当前播放的歌曲从收藏歌单里移除。
 - 【播放列表收藏】，这个用于播放收藏歌单。
-- 【播放本地歌曲+歌名】，这个口令和播放歌曲的区别是本地找不到也不会去下载。
+- ~【播放本地歌曲+歌名】，这个口令和播放歌曲的区别是本地找不到也不会去下载。~
 - 【播放列表第几个+列表名】，具体见： <https://github.com/hanxi/xiaomusic/issues/158>
 - 【搜索播放+关键词】，会搜索关键词作为临时搜索列表播放，比如说【搜索播放林俊杰】，会播放所有林俊杰的歌。
 - 【本地搜索播放+关键词】，跟搜索播放的区别是本地找不到也不会去下载。
